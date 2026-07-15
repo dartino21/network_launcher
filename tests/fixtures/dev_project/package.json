@@ -1,0 +1,4 @@
+{
+  "scripts": {"dev": "next dev"},
+  "dependencies": {"next": "16"}
+}

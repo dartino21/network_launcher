@@ -1,0 +1,26 @@
+# User data and downloaded tools
+data/
+bin/
+config.json
+logs/
+runtime/
+
+# Build output
+build/
+dist/
+release/
+*.spec.bak
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+.venv/
+venv/
+env/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.cursor/
