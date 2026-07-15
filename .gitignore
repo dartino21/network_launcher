@@ -1,9 +1,11 @@
-# User data and downloaded tools
+# Local user data and downloaded runtime tools
 data/
 bin/
 config.json
 logs/
 runtime/
+ngrok.exe
+*.log
 
 # Build output
 build/
@@ -23,4 +25,8 @@ env/
 # OS and editor files
 .DS_Store
 Thumbs.db
+
+# Local AI/editor agent configuration
 .cursor/
+.agents/
+.codex/
