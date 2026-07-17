@@ -1,10 +1,10 @@
 # Local user data and downloaded runtime tools
-data/
-bin/
-config.json
-logs/
-runtime/
-ngrok.exe
+/data/
+/bin/
+/config.json
+/logs/
+/runtime/
+/ngrok.exe
 *.log
 
 # Local secrets and environment overrides
@@ -15,9 +15,9 @@ ngrok.exe
 *.key
 
 # Build output
-build/
-dist/
-release/
+/build/
+/dist/
+/release/
 *.spec.bak
 
 # Python and test caches
