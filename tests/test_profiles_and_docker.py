@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
@@ -51,6 +50,12 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(detect_dev_project(str(root)))
         findings = find_loopback_browser_urls(str(root))
         self.assertEqual(findings[0]["file"], os.path.join("src", "client.ts"))
+
+    def test_loopback_preflight_prunes_dependencies_and_honors_timeout(self):
+        root = Path(__file__).parent / "fixtures" / "preflight_project"
+        findings = find_loopback_browser_urls(str(root))
+        self.assertEqual([item["file"] for item in findings], [os.path.join("src", "client.ts")])
+        self.assertEqual(find_loopback_browser_urls(str(root), timeout=0), [])
 
     def test_runtime_override_is_outside_project_and_removed(self):
         project = str(Path(__file__).parent / "fixtures" / "dev_project")

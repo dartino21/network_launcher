@@ -7,6 +7,13 @@ runtime/
 ngrok.exe
 *.log
 
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
 # Build output
 build/
 dist/
@@ -18,6 +25,16 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 pytest-cache-files-*/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.egg-info/
+.eggs/
 .venv/
 venv/
 env/
@@ -25,6 +42,12 @@ env/
 # OS and editor files
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*.tmp
+*.bak
 
 # Local AI/editor agent configuration
 .cursor/

@@ -4,7 +4,9 @@ import os
 from unittest.mock import MagicMock, patch
 
 from network_launcher.server_manager import (
+    ServerManager,
     find_project_python,
+    is_ready_http_status,
     launch_prerequisite_error,
 )
 
@@ -42,3 +44,43 @@ def test_docker_unavailable_has_actionable_message():
     ):
         error = launch_prerequisite_error(PROJECT, "docker")
     assert error == "Docker Desktop не запущен"
+
+
+def _response(status: int, url: str = "http://127.0.0.1:8080") -> MagicMock:
+    response = MagicMock(status_code=status, url=url)
+    return response
+
+
+def test_readiness_retries_404_until_200():
+    manager = ServerManager()
+    with patch(
+        "network_launcher.server_manager.requests.get",
+        side_effect=[_response(404), _response(200)],
+    ), patch("network_launcher.server_manager.time.sleep"):
+        result = manager._probe_http("http://127.0.0.1:8080", timeout=1)
+    assert result["ok"] is True
+    assert result["status"] == 200
+
+
+def test_persistent_404_is_not_ready():
+    manager = ServerManager()
+    with patch("network_launcher.server_manager.requests.get", return_value=_response(404)), patch(
+        "network_launcher.server_manager.time.sleep"
+    ), patch("network_launcher.server_manager.time.time", side_effect=[0, 0, 2]):
+        result = manager._probe_http("http://127.0.0.1:8080", timeout=1)
+    assert result == {"ok": False, "error": "HTTP 404"}
+
+
+def test_ready_status_policy_and_public_check_header():
+    assert is_ready_http_status(200)
+    assert is_ready_http_status(302)
+    assert is_ready_http_status(401)
+    assert is_ready_http_status(403)
+    assert not is_ready_http_status(404)
+    assert not is_ready_http_status(502)
+
+    manager = ServerManager()
+    with patch("network_launcher.server_manager.requests.get", return_value=_response(200)) as get:
+        result = manager.verify_public_url("https://demo.ngrok.app", timeout=1)
+    assert result["public_ok"] is True
+    assert get.call_args.kwargs["headers"] == {"ngrok-skip-browser-warning": "1"}

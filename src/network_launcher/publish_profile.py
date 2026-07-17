@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -148,36 +149,43 @@ def resolve_toggle(value: str, auto_value: bool) -> bool:
     return auto_value
 
 
-def find_loopback_browser_urls(project_path: str, limit: int = 10) -> list[dict[str, Any]]:
+def find_loopback_browser_urls(
+    project_path: str,
+    limit: int = 10,
+    timeout: float = 2.0,
+) -> list[dict[str, Any]]:
     """Ищет browser-side абсолютные loopback URL, не читая зависимости и секреты."""
     root = Path(project_path)
     findings: list[dict[str, Any]] = []
+    deadline = time.monotonic() + max(0.0, timeout)
     try:
-        files = root.rglob("*")
-        for path in files:
-            if len(findings) >= limit:
+        for current_dir, directories, files in os.walk(root):
+            directories[:] = [name for name in directories if name not in _SKIP_DIRS]
+            if time.monotonic() >= deadline:
                 break
-            if not path.is_file() or path.suffix.lower() not in _BROWSER_EXTENSIONS:
-                continue
-            if any(part in _SKIP_DIRS for part in path.parts):
-                continue
-            try:
-                if path.stat().st_size > 1_000_000:
+            for name in files:
+                if len(findings) >= limit or time.monotonic() >= deadline:
+                    return findings
+                path = Path(current_dir, name)
+                if path.suffix.lower() not in _BROWSER_EXTENSIONS:
                     continue
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            for line_no, line in enumerate(text.splitlines(), 1):
-                match = _LOOPBACK_URL_RE.search(line)
-                if match:
-                    findings.append(
-                        {
-                            "file": os.path.relpath(path, root),
-                            "line": line_no,
-                            "url": match.group(0),
-                        }
-                    )
-                    break
+                try:
+                    if path.stat().st_size > 1_000_000:
+                        continue
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for line_no, line in enumerate(text.splitlines(), 1):
+                    match = _LOOPBACK_URL_RE.search(line)
+                    if match:
+                        findings.append(
+                            {
+                                "file": os.path.relpath(path, root),
+                                "line": line_no,
+                                "url": match.group(0),
+                            }
+                        )
+                        break
     except OSError:
         return findings
     return findings

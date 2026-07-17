@@ -164,11 +164,17 @@ class HelpDialog(QDialog):
         self.resize(760, 570)
         layout = QVBoxLayout(self)
         view = QTextBrowser()
+        view.setObjectName("helpBrowser")
         view.setOpenExternalLinks(True)
+        view.document().setDefaultStyleSheet(
+            "body { color: #F4F7FB; background: #10141C; } "
+            "h2, h3, b { color: #FFFFFF; } "
+            "a { color: #76A0FF; }"
+        )
         view.setHtml(
             """
             <h2>Быстрый старт</h2>
-            <ol><li>Настройте ngrok authtoken один раз.</li>
+            <ol><li>Откройте вкладку «Настройки», получите ngrok authtoken по ссылке и сохраните его в программе.</li>
             <li>Нажмите «Выбрать папку» и выберите корень сайта.</li>
             <li>Нажмите «Запустить проект», дождитесь статуса «Работает» и передайте публичную ссылку.</li></ol>
             <p>Поддерживаются: <b>index.html</b>, <b>package.json</b>, <b>app.py</b> (Flask) и Docker Compose.</p>
@@ -188,7 +194,7 @@ class HelpDialog(QDialog):
 
 
 class LogReaderThread(QThread):
-    """Читает stdout/stderr процесса сервера без блокировки GUI."""
+    """Читает объединённый stdout/stderr процесса без блокировки GUI."""
 
     line_received = pyqtSignal(str)
     finished_reading = pyqtSignal()
@@ -213,12 +219,6 @@ class LogReaderThread(QThread):
                 elif proc.poll() is not None:
                     break
 
-            if proc.stderr:
-                while True:
-                    err = proc.stderr.readline()
-                    if not err:
-                        break
-                    self.line_received.emit(err.rstrip("\r\n"))
         finally:
             self.finished_reading.emit()
 
@@ -276,7 +276,6 @@ class StartWorker(QThread):
                 self._server.stop_server()
                 self.finished_start.emit(tunnel)
                 return
-            self.public_url_ready.emit(tunnel["public_url"])
             report("Публичный URL получен — запускаем проект с runtime-окружением…")
             result = self._server.start_prepared(plan, tunnel["public_url"])
             if not result.get("ok"):
@@ -284,6 +283,21 @@ class StartWorker(QThread):
                 self._server.stop_server()
                 self.finished_start.emit(result)
                 return
+            public_checks = self._server.verify_public_url(tunnel["public_url"], timeout=30)
+            if not public_checks.get("public_ok"):
+                self._tunnel.stop_tunnel()
+                self._server.stop_server()
+                self.finished_start.emit(
+                    {
+                        "ok": False,
+                        "error": (
+                            "Локальный сайт запущен, но публичная ссылка не прошла проверку: "
+                            f"{public_checks.get('error', 'нет ответа')}"
+                        ),
+                    }
+                )
+                return
+            result["public_checks"] = public_checks
             self.finished_start.emit({"ok": True, "server": result, "tunnel": tunnel})
         except Exception as exc:  # noqa: BLE001
             try:
@@ -295,6 +309,65 @@ class StartWorker(QThread):
         finally:
             self._server.set_progress(None)
             self._tunnel.set_progress(None)
+
+
+class RuntimePollWorker(QThread):
+    """Собирает состояние ngrok, статистику и Docker вне GUI-потока."""
+
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, server, tunnel, stats, project_path: str):
+        super().__init__()
+        self._server = server
+        self._tunnel = tunnel
+        self._stats = stats
+        self._project_path = project_path
+
+    def run(self):
+        try:
+            server_status = self._server.get_server_status()
+            payload = {
+                "ok": True,
+                "public_url": self._tunnel.get_public_url(refresh=True),
+                "stats": self._stats.update_stats(),
+                "history": self._stats.history_for_chart(),
+            }
+            if server_status.get("type") == "docker":
+                manager = self._server.get_docker_manager()
+                if manager:
+                    payload["docker_status"] = manager.get_container_status(
+                        self._project_path
+                    )
+            self.result_ready.emit(payload)
+        except Exception as exc:  # noqa: BLE001
+            self.result_ready.emit({"ok": False, "error": str(exc)})
+
+
+class DockerLogsWorker(QThread):
+    result_ready = pyqtSignal(str)
+
+    def __init__(self, manager, project_path: str):
+        super().__init__()
+        self._manager = manager
+        self._project_path = project_path
+
+    def run(self):
+        self.result_ready.emit(self._manager.get_docker_logs(self._project_path))
+
+
+class NgrokAuthWorker(QThread):
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, tunnel: TunnelManager, token: str = ""):
+        super().__init__()
+        self._tunnel = tunnel
+        self._token = token
+
+    def run(self):
+        if self._token:
+            self.result_ready.emit(self._tunnel.save_authtoken(self._token))
+        else:
+            self.result_ready.emit(self._tunnel.check_auth_status())
 
 class VisitsChart(FigureCanvasQTAgg):
     """График уникальных посетителей по минутам сессии."""
@@ -369,15 +442,23 @@ class BaseMainWindow(QMainWindow):
         self.stats = StatsCollector()
         self._log_thread = None
         self._start_worker = None
+        self._poll_worker = None
+        self._docker_logs_worker = None
+        self._auth_worker = None
+        self._last_chart_history = []
+        self._last_docker_summary = ""
         self._stats_timer = QTimer(self)
         self._stats_timer.setInterval(5000)
         self._stats_timer.timeout.connect(self._poll_tunnel_stats)
         self._config = load_config()
         self._build_ui()
+        self.log.document().setMaximumBlockCount(3000)
         self._set_idle_buttons()
         self._reset_tunnel_ui()
         self.export_btn.setEnabled(False)
         self._apply_config(self._config)
+        if hasattr(self, "_refresh_ngrok_auth_status"):
+            QTimer.singleShot(0, self._refresh_ngrok_auth_status)
 
     def _build_ui(self):
         central = QWidget()
@@ -643,15 +724,14 @@ class BaseMainWindow(QMainWindow):
             self._profile_from_ui(),
         )
         worker.progress.connect(self.update_status)
-        worker.public_url_ready.connect(self._on_public_url_ready)
         worker.finished_start.connect(self._on_start_finished)
         self._start_worker = worker
         worker.start()
 
     def _on_public_url_ready(self, public_url: str):
-        """Expose the URL while the local project is still warming up."""
+        """Backward-compatible hook; production startup exposes only verified URLs."""
         self._set_tunnel_connected(public_url)
-        self.update_status("Ссылка готова; ожидаем запуск локального сайта…")
+        self.update_status("Публичная ссылка проверена и готова.")
 
     def _on_start_finished(self, payload: dict):
         self._start_worker = None
@@ -698,7 +778,7 @@ class BaseMainWindow(QMainWindow):
 
         if is_docker:
             self.mode_label.setText("Режим: Docker")
-            self._refresh_docker_status()
+            self._apply_docker_status(result.get("docker_status") or {})
             gw = result.get("gateway_mode")
             if gw == "proxy":
                 self.update_status(
@@ -724,11 +804,10 @@ class BaseMainWindow(QMainWindow):
                         f"Предупреждение: бэкенд :{result['backend_port']} не ответил на health — "
                         f"кнопки API могут не работать. Откройте «Логи Docker»."
                     )
-                    dm = self.server.get_docker_manager()
-                    if dm:
+                    backend_logs = result.get("backend_log_tail")
+                    if backend_logs:
                         self.update_status(
-                            "Логи backend:\n"
-                            + dm.get_docker_logs(self._project_path)[-1500:]
+                            "Логи backend:\n" + backend_logs
                         )
             else:
                 self.backend_health_label.setText("Бэкенд: не обнаружен в compose")
@@ -757,6 +836,11 @@ class BaseMainWindow(QMainWindow):
             f"WebSocket relay={'готов' if checks.get('websocket_ready') else 'не готов'}, "
             f"dev compatibility={'on' if result.get('dev_compatibility') else 'off'}"
         )
+        public_checks = result.get("public_checks") or {}
+        self.update_status(
+            "Проверка публичной ссылки: "
+            f"{'OK ' + str(public_checks.get('status')) if public_checks.get('public_ok') else 'FAIL'}"
+        )
         if result.get("auth_url_applied"):
             self.update_status(
                 "AUTH/NEXTAUTH_URL привязан к публичному URL. "
@@ -775,7 +859,7 @@ class BaseMainWindow(QMainWindow):
             self._start_log_reader(proc)
 
     def show_docker_logs(self):
-        """Открывает окно с docker compose logs."""
+        """Загружает docker compose logs в фоне и затем открывает окно."""
         path = self._project_path
         if not path or detect_project_type(path) != "docker":
             self.update_status("Логи Docker доступны только для compose-проектов.")
@@ -785,19 +869,26 @@ class BaseMainWindow(QMainWindow):
             from .docker_manager import DockerManager
 
             dm = DockerManager(path)
-        text = dm.get_docker_logs(path)
+        if self._docker_logs_worker and self._docker_logs_worker.isRunning():
+            return
+        self.docker_logs_btn.setEnabled(False)
+        self.update_status("Получение Docker-логов…")
+        worker = DockerLogsWorker(dm, path)
+        worker.result_ready.connect(self._on_docker_logs_ready)
+        self._docker_logs_worker = worker
+        worker.start()
+
+    def _on_docker_logs_ready(self, text: str):
+        self._docker_logs_worker = None
+        self.docker_logs_btn.setEnabled(
+            self._running and detect_project_type(self._project_path) == "docker"
+        )
         DockerLogsDialog(text, self).exec_()
 
-    def _refresh_docker_status(self):
-        """Обновляет строку статуса контейнеров."""
-        path = self._project_path
-        dm = self.server.get_docker_manager()
-        if not path or not dm:
-            self.docker_status_label.setText("Docker: —")
-            return
-        status = dm.get_container_status(path)
+    def _apply_docker_status(self, status: dict):
+        """Применяет уже собранный в фоне статус контейнеров."""
         if not status:
-            self.docker_status_label.setText("Docker: нет сервисов")
+            self.docker_status_label.setText("Docker: —")
             return
         parts = []
         for name, info in status.items():
@@ -805,8 +896,11 @@ class BaseMainWindow(QMainWindow):
             state = info.get("state", "unknown")
             mark = "OK" if state == "running" else state
             parts.append(f"{name}[{role}]: {mark}")
+        summary = ", ".join(parts)
         self.docker_status_label.setText("Docker: " + " | ".join(parts))
-        self.update_status("Контейнеры: " + ", ".join(parts))
+        if summary != self._last_docker_summary:
+            self._last_docker_summary = summary
+            self.update_status("Контейнеры: " + summary)
 
     def stop(self):
         self._shutdown_all()
@@ -842,12 +936,14 @@ class BaseMainWindow(QMainWindow):
 
     def _shutdown_all(self):
         self._stats_timer.stop()
-        self._stop_log_reader()
         if self._start_worker and self._start_worker.isRunning():
             self._start_worker.wait(3000)
         self.tunnel.stop_tunnel()
         self.server.stop_server()
+        self._stop_log_reader()
         self.stats.reset()
+        self._last_chart_history = []
+        self._last_docker_summary = ""
         self._reset_tunnel_ui()
         self._clear_preview()
         self.chart.redraw([])
@@ -884,15 +980,23 @@ class BaseMainWindow(QMainWindow):
         self._last_users = -1
 
     def _poll_tunnel_stats(self):
-        if not self._running:
+        if not self._running or (self._poll_worker and self._poll_worker.isRunning()):
             return
+        worker = RuntimePollWorker(
+            self.server, self.tunnel, self.stats, self._project_path
+        )
+        worker.result_ready.connect(self._on_runtime_poll_ready)
+        worker.finished.connect(self._on_runtime_poll_finished)
+        self._poll_worker = worker
+        worker.start()
 
-        # для Docker периодически обновляем статусы контейнеров
-        status = self.server.get_server_status()
-        if status.get("type") == "docker":
-            self._refresh_docker_status()
+    def _on_runtime_poll_finished(self):
+        self._poll_worker = None
 
-        url = self.tunnel.get_public_url()
+    def _on_runtime_poll_ready(self, payload: dict):
+        if not self._running or not payload.get("ok"):
+            return
+        url = payload.get("public_url")
         if url:
             self._set_tunnel_connected(url)
             self.stats.set_session_meta(
@@ -901,17 +1005,25 @@ class BaseMainWindow(QMainWindow):
                 public_url=url,
             )
         else:
-            self.tunnel_status_label.setText("Туннель: отключён")
-            self.public_url_label.setText("Публичный URL: —")
+            self._set_tunnel_lost()
 
-        data = self.stats.update_stats()
+        data = payload.get("stats") or {"current": 0, "total": 0}
         current = data["current"]
         total = data["total"]
         self.users_label.setText(f"Пользователи: {current} / всего {total}")
-        self.chart.redraw(self.stats.history_for_chart())
+        history = payload.get("history") or []
+        if history != self._last_chart_history:
+            self._last_chart_history = list(history)
+            self.chart.redraw(history)
+        if "docker_status" in payload:
+            self._apply_docker_status(payload["docker_status"])
         if current != self._last_users:
             self._last_users = current
             self.update_status(f"Пользователи: {current} (всего {total})")
+
+    def _set_tunnel_lost(self):
+        self.tunnel_status_label.setText("Туннель: отключён")
+        self.public_url_label.setText("Публичный URL: —")
 
     def _start_log_reader(self, process):
         self._stop_log_reader()
@@ -1234,6 +1346,42 @@ class MainWindow(BaseMainWindow):
         layout.setContentsMargins(0, 12, 0, 4)
         layout.setSpacing(14)
 
+        auth_card = QFrame()
+        auth_card.setObjectName("card")
+        auth_layout = QVBoxLayout(auth_card)
+        auth_layout.setContentsMargins(18, 15, 18, 17)
+        auth_layout.setSpacing(10)
+        auth_header = QHBoxLayout()
+        auth_title = QLabel("Доступ к ngrok")
+        auth_title.setObjectName("sectionTitle")
+        self.ngrok_auth_status = QLabel("●  Токен не настроен")
+        self.ngrok_auth_status.setObjectName("authStatus")
+        self.ngrok_auth_status.setProperty("state", "missing")
+        auth_header.addWidget(auth_title)
+        auth_header.addStretch(1)
+        auth_header.addWidget(self.ngrok_auth_status)
+        auth_layout.addLayout(auth_header)
+        auth_help = QLabel(
+            'Скопируйте ключ на странице '
+            '<a href="https://dashboard.ngrok.com/get-started/your-authtoken">'
+            '«Получить authtoken»</a>, вставьте его ниже и сохраните.'
+        )
+        auth_help.setObjectName("ngrokHelpLink")
+        auth_help.setOpenExternalLinks(True)
+        auth_help.setWordWrap(True)
+        auth_layout.addWidget(auth_help)
+        auth_row = QHBoxLayout()
+        self.ngrok_token_edit = QLineEdit()
+        self.ngrok_token_edit.setObjectName("ngrokTokenEdit")
+        self.ngrok_token_edit.setEchoMode(QLineEdit.Password)
+        self.ngrok_token_edit.setPlaceholderText("Вставьте ngrok authtoken")
+        self.ngrok_save_btn = QPushButton("Сохранить токен")
+        self.ngrok_save_btn.clicked.connect(self._save_ngrok_authtoken)
+        auth_row.addWidget(self.ngrok_token_edit, stretch=1)
+        auth_row.addWidget(self.ngrok_save_btn)
+        auth_layout.addLayout(auth_row)
+        layout.addWidget(auth_card)
+
         intro = QFrame()
         intro.setObjectName("card")
         intro_layout = QVBoxLayout(intro)
@@ -1326,6 +1474,9 @@ class MainWindow(BaseMainWindow):
             self._set_app_state("error", "●  Ошибка запуска")
             self.tunnel_card.set_content("Ошибка", "Подробности находятся в журнале", "danger")
             self.main_tabs.setCurrentIndex(2)
+            error = str(payload.get("error") or "").lower()
+            if "authtoken" in error or "authentication failed" in error or "авторизац" in error:
+                self._set_ngrok_auth_status(False, "Токен не принят ngrok")
 
     def stop(self):
         super().stop()
@@ -1355,14 +1506,60 @@ class MainWindow(BaseMainWindow):
 
     def _poll_tunnel_stats(self):
         super()._poll_tunnel_stats()
-        if self._running and not self.tunnel.get_public_url():
-            self._public_url = ""
-            self.public_url_label.setText("Не создан")
-            self.copy_url_btn.setEnabled(False)
-            self.open_url_btn.setEnabled(False)
-            self.tunnel_card.set_content(
-                "Отключён", "Соединение с ngrok потеряно", "warning"
-            )
+
+    def _set_tunnel_lost(self):
+        super()._set_tunnel_lost()
+        self._public_url = ""
+        self.public_url_label.setText("Не создан")
+        self.copy_url_btn.setEnabled(False)
+        self.open_url_btn.setEnabled(False)
+        self.tunnel_card.set_content(
+            "Отключён", "Соединение с ngrok потеряно", "warning"
+        )
+
+    def _refresh_ngrok_auth_status(self):
+        self._start_ngrok_auth_worker("")
+
+    def _save_ngrok_authtoken(self):
+        token = self.ngrok_token_edit.text().strip()
+        if not token:
+            self._set_ngrok_auth_status(False, "Вставьте authtoken")
+            return
+        self._start_ngrok_auth_worker(token)
+
+    def _start_ngrok_auth_worker(self, token: str):
+        if self._auth_worker and self._auth_worker.isRunning():
+            return
+        self.ngrok_save_btn.setEnabled(False)
+        self.ngrok_auth_status.setText("●  Проверка…")
+        self.ngrok_auth_status.setProperty("state", "checking")
+        repolish(self.ngrok_auth_status)
+        worker = NgrokAuthWorker(self.tunnel, token)
+        worker.result_ready.connect(self._on_ngrok_auth_result)
+        worker.finished.connect(self._on_ngrok_auth_finished)
+        self._auth_worker = worker
+        worker.start()
+
+    def _on_ngrok_auth_finished(self):
+        self._auth_worker = None
+        self.ngrok_save_btn.setEnabled(True)
+
+    def _on_ngrok_auth_result(self, result: dict):
+        configured = bool(result.get("configured"))
+        message = str(result.get("message") or "Токен не настроен")
+        self._set_ngrok_auth_status(configured, message)
+        if configured:
+            self.ngrok_token_edit.clear()
+            self.update_status("ngrok authtoken сохранён и настроен")
+        elif not result.get("ok"):
+            self.update_status(f"Ошибка настройки ngrok: {message}")
+
+    def _set_ngrok_auth_status(self, configured: bool, message: str):
+        state = "configured" if configured else "missing"
+        self.ngrok_auth_status.setProperty("state", state)
+        self.ngrok_auth_status.setText(f"●  {message}")
+        self.ngrok_auth_status.setToolTip(message)
+        repolish(self.ngrok_auth_status)
 
     def _load_preview(self, url: str):
         super()._load_preview(url)

@@ -15,6 +15,7 @@ import requests
 import yaml
 
 from .config import data_dir
+from .process_utils import hidden_process_kwargs
 
 ProgressFn = Callable[[str], None]
 
@@ -63,7 +64,11 @@ def _compose_cmd() -> Optional[list[str]]:
     if shutil.which("docker"):
         try:
             result = subprocess.run(
-                ["docker", "compose", "version"], capture_output=True, text=True, timeout=10
+                ["docker", "compose", "version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **hidden_process_kwargs(),
             )
             if result.returncode == 0:
                 return ["docker", "compose"]
@@ -80,7 +85,13 @@ def docker_available() -> tuple[bool, str]:
     if not _compose_cmd():
         return False, "Команда docker compose недоступна. Обновите Docker Desktop."
     try:
-        result = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=15)
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            **hidden_process_kwargs(),
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"Не удалось проверить Docker: {exc}"
     if result.returncode != 0:
@@ -214,6 +225,7 @@ class DockerManager:
                 capture_output=True,
                 text=True,
                 timeout=600,
+                **hidden_process_kwargs(),
             )
         except FileNotFoundError:
             self.cleanup_runtime_override()
@@ -249,7 +261,12 @@ class DockerManager:
             return {"ok": False, "error": "docker compose недоступен"}
         try:
             completed = subprocess.run(
-                cmd + ["stop"], cwd=project_path, capture_output=True, text=True, timeout=120
+                cmd + ["stop"],
+                cwd=project_path,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                **hidden_process_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.cleanup_runtime_override()
@@ -346,7 +363,8 @@ class DockerManager:
                 cwd=project_path,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=8,
+                **hidden_process_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return status
@@ -379,7 +397,12 @@ class DockerManager:
             args.append(service)
         try:
             completed = subprocess.run(
-                args, cwd=project_path, capture_output=True, text=True, timeout=60
+                args,
+                cwd=project_path,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                **hidden_process_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return str(exc)

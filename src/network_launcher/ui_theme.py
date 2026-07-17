@@ -55,6 +55,8 @@ QLabel#appTitle {
 QLabel#subtitle, QLabel#caption, QLabel#statusTitle {
     color: #8F9BAD;
 }
+QLabel#ngrokHelpLink { color: #8F9BAD; }
+QLabel#ngrokHelpLink a { color: #76A0FF; }
 QLabel#sectionTitle {
     color: #F4F7FB;
     font-size: 15px;
@@ -93,6 +95,24 @@ QLabel#publicUrlLabel {
     font-size: 14px;
 }
 QLabel#publicUrlLabel a { color: #76A0FF; text-decoration: none; }
+QLabel#authStatus {
+    background: #3B2027;
+    border: 1px solid #7B3543;
+    border-radius: 11px;
+    color: #FF8A9A;
+    font-weight: 600;
+    padding: 5px 10px;
+}
+QLabel#authStatus[state="configured"] {
+    background: #16352B;
+    border-color: #246C54;
+    color: #5CDFAC;
+}
+QLabel#authStatus[state="checking"] {
+    background: #342C1C;
+    border-color: #705B2C;
+    color: #F3C568;
+}
 QLineEdit, QPlainTextEdit, QSpinBox, QComboBox {
     background: #10141C;
     border: 1px solid #303B4F;
@@ -108,6 +128,14 @@ QLineEdit:read-only { color: #C2CBD9; background: #121720; }
 QPlainTextEdit {
     font-family: "Consolas";
     font-size: 12px;
+}
+QTextBrowser#helpBrowser {
+    background: #10141C;
+    border: 1px solid #303B4F;
+    border-radius: 9px;
+    color: #F4F7FB;
+    padding: 12px;
+    selection-background-color: #5B8CFF;
 }
 QSpinBox::up-button, QSpinBox::down-button { width: 18px; border: none; }
 QComboBox::drop-down { border: none; width: 28px; }

@@ -18,6 +18,7 @@ import requests
 
 from .docker_manager import DockerManager, check_backend_health, detect_docker_project, docker_available
 from .gateway_proxy import GatewayProxy, detect_existing_gateway_port
+from .process_utils import hidden_process_kwargs
 from .publish_profile import (
     PublishProfile,
     detect_dev_project,
@@ -27,10 +28,16 @@ from .publish_profile import (
 from .spa_server import SpaHandler
 
 ProgressFn = Callable[[str], None]
+STATIC_READY_TIMEOUT = 10
 
 
 def _noop(_msg: str) -> None:
     pass
+
+
+def is_ready_http_status(status_code: int) -> bool:
+    """Return True only when a browser-facing application is actually usable."""
+    return 200 <= status_code < 400 or status_code in {401, 403}
 
 
 def find_free_port(start_port: int = 8080, excluded: Optional[set[int]] = None) -> int:
@@ -90,7 +97,11 @@ def launch_prerequisite_error(project_path: str, project_type: str) -> Optional[
             return "Не найден Python проекта. Создайте .venv с Flask или установите Python в PATH."
         try:
             probe = subprocess.run(
-                [python, "-c", "import flask"], capture_output=True, text=True, timeout=10
+                [python, "-c", "import flask"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **hidden_process_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f"Не удалось проверить Python/Flask: {exc}"
@@ -290,11 +301,28 @@ class ServerManager:
                 cmd = self._start_local_project(plan, runtime_env)
             except OSError as exc:
                 return {"ok": False, "error": str(exc)}
-            if not self._wait_for_http(f"http://127.0.0.1:{plan['frontend_port']}", timeout=180):
+            readiness_timeout = (
+                STATIC_READY_TIMEOUT if project_type == "static" else 180
+            )
+            readiness = self._probe_http(
+                f"http://127.0.0.1:{plan['frontend_port']}",
+                timeout=readiness_timeout,
+            )
+            if not readiness.get("ok"):
+                if project_type == "static":
+                    return {
+                        "ok": False,
+                        "error": (
+                            "Встроенный static-сервер не смог открыть index.html "
+                            f"на порту :{plan['frontend_port']} за {readiness_timeout} с. "
+                            f"Последняя проверка: {readiness.get('error', 'нет ответа')}."
+                        ),
+                    }
                 return {
                     "ok": False,
                     "error": (
                         f"Сайт не ответил на локальном порту :{plan['frontend_port']} за 180 с. "
+                        f"Последняя проверка: {readiness.get('error', 'нет ответа')}. "
                         "Проверьте команды и ошибки сайта на вкладке «Логи»."
                     ),
                 }
@@ -365,11 +393,17 @@ class ServerManager:
         )
         if not result.get("ok"):
             return result
-        if not manager.wait_for_service(plan["frontend_port"], timeout=180):
+        readiness = self._probe_http(
+            f"http://127.0.0.1:{plan['frontend_port']}", timeout=180
+        )
+        if not readiness.get("ok"):
             logs = manager.get_docker_logs(plan["project_path"])
             return {
                 "ok": False,
-                "error": f"Приложение не ответило на :{plan['frontend_port']}.\nЛоги:\n{logs[-2500:]}",
+                "error": (
+                    f"Приложение не готово на :{plan['frontend_port']}: "
+                    f"{readiness.get('error', 'нет ответа')}.\nЛоги:\n{logs[-2500:]}"
+                ),
             }
         backend_ok = None
         health_url = None
@@ -396,36 +430,37 @@ class ServerManager:
             "args": command,
             "cwd": project_path,
             "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
             "text": True,
             "bufsize": 1,
             "env": env,
         }
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        kwargs.update(hidden_process_kwargs())
         self._process = subprocess.Popen(**kwargs)
         return " ".join(command)
 
     def verify_proxy(self, timeout: int = 30) -> dict:
         if not self._url:
             return {"http_ok": False, "websocket_ready": False, "error": "Нет proxy URL"}
-        deadline = time.time() + timeout
-        last_error = ""
-        while time.time() < deadline:
-            try:
-                response = requests.get(self._url, timeout=5, allow_redirects=True)
-                if response.status_code < 500:
-                    return {
-                        "http_ok": True,
-                        "websocket_ready": True,
-                        "status": response.status_code,
-                        "final_url": response.url,
-                    }
-                last_error = f"HTTP {response.status_code}"
-            except requests.RequestException as exc:
-                last_error = str(exc)
-            time.sleep(0.5)
-        return {"http_ok": False, "websocket_ready": True, "error": last_error}
+        result = self._probe_http(self._url, timeout=timeout)
+        return {
+            "http_ok": bool(result.get("ok")),
+            "websocket_ready": True,
+            **{key: value for key, value in result.items() if key != "ok"},
+        }
+
+    def verify_public_url(self, public_url: str, timeout: int = 30) -> dict:
+        """Verify that ngrok reaches the application, not an interstitial or stale tunnel."""
+        self._progress("Проверка публичного HTTPS-адреса…")
+        result = self._probe_http(
+            public_url,
+            timeout=timeout,
+            headers={"ngrok-skip-browser-warning": "1"},
+        )
+        return {
+            "public_ok": bool(result.get("ok")),
+            **{key: value for key, value in result.items() if key != "ok"},
+        }
 
     def stop_server(self) -> None:
         if self._project_type == "docker" and self._project_path:
@@ -513,6 +548,7 @@ class ServerManager:
                 capture_output=True,
                 text=True,
                 timeout=600,
+                **hidden_process_kwargs(),
             )
         except FileNotFoundError:
             return "npm не найден. Установите Node.js."
@@ -557,17 +593,37 @@ class ServerManager:
             str(port),
         ], env
 
-    def _wait_for_http(self, url: str, timeout: int) -> bool:
+    def _probe_http(
+        self,
+        url: str,
+        timeout: int,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict:
         deadline = time.time() + timeout
         self._progress(f"Ожидание HTTP {url} (до {timeout} с)…")
+        last_error = "нет ответа"
         while time.time() < deadline:
             if self._process is not None and self._process.poll() is not None:
-                return False
+                return {"ok": False, "error": "процесс проекта завершился"}
             try:
-                response = requests.get(url, timeout=3, allow_redirects=False)
-                if response.status_code < 500:
-                    return True
-            except requests.RequestException:
-                pass
+                response = requests.get(
+                    url,
+                    timeout=3,
+                    allow_redirects=True,
+                    headers=headers,
+                )
+                if is_ready_http_status(response.status_code):
+                    return {
+                        "ok": True,
+                        "status": response.status_code,
+                        "final_url": response.url,
+                    }
+                last_error = f"HTTP {response.status_code}"
+            except requests.RequestException as exc:
+                last_error = str(exc)
             time.sleep(0.5)
-        return False
+        return {"ok": False, "error": last_error}
+
+    def _wait_for_http(self, url: str, timeout: int) -> bool:
+        """Backward-compatible boolean wrapper used by older callers."""
+        return bool(self._probe_http(url, timeout).get("ok"))
