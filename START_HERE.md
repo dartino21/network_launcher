@@ -1,35 +1,52 @@
 # Начните отсюда
 
-## Я открыл эту папку на компьютере
+Этот файл помогает быстро выбрать нужный маршрут. Основное описание и возможности проекта находятся в [README.md](README.md).
 
-Если вы работаете прямо с исходниками проекта, запустите `RUN_APP.bat` в корне папки. Для этого на компьютере должен быть установлен Python и зависимости из `requirements.txt`.
+## Я хочу просто запустить Network Launcher
 
-EXE-файл не хранится в репозитории GitHub. Он создаётся локально командой `scripts\build_windows.ps1` или автоматически в GitHub Releases.
+1. Скачайте ZIP со страницы [Latest Release](https://github.com/dartino21/network_launcher/releases/latest).
+2. Полностью распакуйте архив в отдельную папку.
+3. Запустите `NetworkLauncher.exe`.
+4. На вкладке **Настройки** сохраните [ngrok authtoken](https://dashboard.ngrok.com/get-started/your-authtoken).
+5. Выберите корневую папку сайта, нажмите **Запустить проект** и дождитесь статуса **Работает**.
 
-## Я хочу запустить программу
+Готовая сборка предназначена для Windows x64. Не запускайте EXE внутри ZIP: приложению нужен доступ на запись к папкам `data/` и `data/logs/` рядом с ним.
 
-1. Откройте страницу **Releases** на GitHub и скачайте архив `NetworkLauncher-v<версия>-windows-x64.zip`.
-2. Распакуйте архив в обычную папку, например `C:\Programs\NetworkLauncher`.
-3. Откройте `NetworkLauncher.exe`.
-4. Откройте вкладку **Настройки**, получите ngrok authtoken по ссылке, вставьте его в скрытое поле и дождитесь зелёного индикатора.
-5. Выберите папку сайта и нажмите **Запустить проект**.
+Если проект не распознаётся или ссылка не открывается, перейдите к [руководству по диагностике](docs/TROUBLESHOOTING.md).
 
-Не запускайте EXE из ZIP-архива: программе нужно создавать рядом папку `data` с настройками и журналом.
+## Я клонировал репозиторий
 
-## Я хочу разрабатывать программу
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt pytest
+.\scripts\run_dev.ps1
+```
 
-1. Установите Python 3.10–3.12 и выполните `python -m pip install -r requirements.txt`.
-2. Запустите `scripts\run_dev.ps1` или `python -m network_launcher` с переменной `PYTHONPATH=src`.
-3. Запустите проверки: `python -m pytest`.
-4. Для локальной сборки EXE используйте `scripts\build_windows.ps1`.
+После установки зависимостей можно использовать `RUN_APP.bat`. Рекомендуемая версия Python для локальной разработки — 3.12; минимальная версия пакета — 3.10.
 
-## Карта репозитория
+## Я изучаю проект как разработчик или технический ревьюер
 
-- `src/network_launcher/` — исходный код приложения.
-- `assets/` — иконки и изображения.
-- `tests/` — автоматические тесты.
-- `docs/` — документация для разработки и выпуска.
-- `scripts/` — запуск и сборка.
-- `data/` — создаётся программой локально и не загружается в Git.
+Начните с этих файлов:
 
-Полное руководство: [README.md](README.md).
+1. [README.md](README.md) — задача, возможности и пользовательский сценарий.
+2. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — схема компонентов и жизненный цикл публикации.
+3. [`src/network_launcher/server_manager.py`](src/network_launcher/server_manager.py) — планирование и управление локальным проектом.
+4. [`src/network_launcher/gateway_proxy.py`](src/network_launcher/gateway_proxy.py) — HTTP/SSE/WebSocket reverse proxy.
+5. [`src/network_launcher/gui.py`](src/network_launcher/gui.py) — GUI и фоновые workers.
+6. [`tests/`](tests/) — 39 автоматических проверок текущего поведения.
+
+Локальная проверка:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m pytest -p no:cacheprovider
+```
+
+## Я хочу внести изменения
+
+Используйте [руководство разработчика](docs/DEVELOPMENT.md): там описаны окружение, тестовые группы, ручной end-to-end smoke-сценарий и проверка сборки.
+
+## Я выпускаю новую версию
+
+Следуйте [docs/RELEASING.md](docs/RELEASING.md). Релиз создаётся тегом `v<версия>` только после синхронизации версии и успешного прохождения тестов.
