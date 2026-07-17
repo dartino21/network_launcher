@@ -25,15 +25,15 @@
 
 ## Публикация
 
-Пример для версии `1.0.3`:
+Пример для версии `1.0.5`:
 
 ```powershell
 git status --short
 git add -A
-git commit -m "Release v1.0.3"
+git commit -m "Release v1.0.5"
 git push origin master
-git tag -a v1.0.3 -m "Network Launcher v1.0.3"
-git push origin v1.0.3
+git tag -a v1.0.5 -m "Network Launcher v1.0.5"
+git push origin v1.0.5
 ```
 
 После отправки тега workflow `Test and release Windows build` повторно запустит
@@ -42,4 +42,4 @@ git push origin v1.0.3
 готовый архив — на странице **Releases**.
 
 Не создавайте тег до коммита с нужной версией. Если версия другая, замените
-`1.0.3` во всех командах и в обоих файлах версии.
+`1.0.5` во всех командах и в обоих файлах версии.
